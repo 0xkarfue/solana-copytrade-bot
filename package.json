@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@prisma/client": "^6.16.3",
+    "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
     "axios": "^1.12.2",
     "grammy": "^1.38.2",
