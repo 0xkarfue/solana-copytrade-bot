@@ -5,18 +5,21 @@ import { getBalanceMessage } from "../getBalance";
 import { swap } from "../swap";
 import { isValidToken } from "../utils/isValid";
 import { getUserTokens } from "../utils/getUserToken";
+import { isValidWallet } from "../utils/isValidWallet";
 
 const prisma = new PrismaClient();
 const token = process.env.TELEGRAM_BOT_TOKEN!;
 const bot = new Bot(token);
 const connection = new Connection(process.env.RPC_URL!);
 
-// Store user state (token, action type, amount, decimals)
+// hold state of user
+
 const userState: Record<string, {
   tokenMint?: string;
-  action?: "buy" | "sell";
+  action?: "buy" | "sell" | "copy";
   tokenAmount?: number;
   tokenDecimals?: number;
+  targetWallet?: string;
 }> = {};
 
 const inlineKeyboard = new InlineKeyboard()
@@ -43,6 +46,15 @@ const sellOptions = new InlineKeyboard()
   .text("50%", "sell_50")
   .row()
   .text("100%", "sell_100");
+
+const copyOptions = new InlineKeyboard()
+  .text("Copy 10%", "copy_10")
+  .text("Copy 25%", "copy_25")
+  .row()
+  .text("Copy 50%", "copy_50")
+  .text("Copy 100%", "copy_100")
+  .row()
+  .text("❌ Stop Copying", "stop_copy");
 
 bot.command("start", async (ctx) => {
   const existing = await prisma.user.findFirst({
@@ -138,37 +150,61 @@ bot.callbackQuery("sell", async (ctx) => {
   await ctx.reply("💡 *Please enter the Token Address:*", { parse_mode: "Markdown" });
 });
 
-// SINGLE message handler - handles BOTH buy and sell
+
 bot.on("message:text", async (ctx) => {
   const chatId = ctx.chatId.toString();
-  const tokenMint = ctx.message.text;
+  const inputText = ctx.message.text; 
 
   const state = userState[chatId];
 
   if (!state || !state.action) {
-    return; // Ignore messages not part of trade flow
+    return; 
   }
 
-  const isValid = await isValidToken(tokenMint);
+ 
+  if (state.action === "copy") {
+    const validation = await isValidWallet(inputText);
+
+    if (!validation.valid) {
+      return ctx.reply(`❌ *${validation.error}*`, { parse_mode: "Markdown" });
+    }
+
+    
+    if (!userState[chatId]) {
+      userState[chatId] = {};
+    }
+    userState[chatId].targetWallet = inputText;
+
+    return ctx.reply(
+      `✅ *Valid wallet detected!*\n\n📍 Address: \`${inputText}\`\n\nSelect copy percentage:`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: copyOptions
+      }
+    );
+  }
+
+  
+  const isValid = await isValidToken(inputText);
 
   if (!isValid) {
     return ctx.reply("⚠️ *Invalid Token Address!*", { parse_mode: "Markdown" });
   }
 
-  // ✅ FIXED: Check if state exists before assigning
+  
   if (!userState[chatId]) {
     userState[chatId] = {};
   }
-  userState[chatId].tokenMint = tokenMint;
+  userState[chatId].tokenMint = inputText;
 
   if (state.action === "buy") {
-    // BUY: Show SOL amount options
+    
     return ctx.reply("💰 *Enter the amount you want to trade:*", {
       parse_mode: "Markdown",
       reply_markup: buyOptions
     });
   } else if (state.action === "sell") {
-    // SELL: Check if user holds token
+    
     const user = await prisma.user.findFirst({
       where: { tgUserId: chatId },
       select: { publicKey: true }
@@ -180,24 +216,27 @@ bot.on("message:text", async (ctx) => {
     }
 
     const tokens = await getUserTokens(user.publicKey);
-    const match = tokens.find((t) => t.mint === tokenMint);
+    const match = tokens.find((t) => t.mint === inputText);
 
     if (!match) {
       delete userState[chatId];
       return ctx.reply("❌ You don't hold this token in your wallet.");
     }
 
-    // ✅ FIXED: Ensure state exists before assigning
+    // Store amount and decimals
     if (!userState[chatId]) {
       userState[chatId] = {};
     }
     userState[chatId].tokenAmount = match.amount;
     userState[chatId].tokenDecimals = match.decimals;
 
-    return ctx.reply(`✅ You hold *${match.amount}* of token:\n\`${match.mint}\`\n\nSelect percentage to sell:`, {
-      parse_mode: "Markdown",
-      reply_markup: sellOptions
-    });
+    return ctx.reply(
+      `✅ You hold *${match.amount}* of token:\n\`${match.mint}\`\n\nSelect percentage to sell:`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: sellOptions
+      }
+    );
   }
 });
 
@@ -206,7 +245,7 @@ bot.callbackQuery(/^buy_(.+)$/, async (ctx) => {
   const match = ctx.match;
   if (!match || typeof match === 'string') return;
 
-  const amount = parseFloat(match[1]!); // ✅ Now we're sure match[1] exists
+  const amount = parseFloat(match[1]!);
   await handleBuy(ctx, amount);
 });
 
@@ -215,7 +254,7 @@ bot.callbackQuery(/^sell_(.+)$/, async (ctx) => {
   const match = ctx.match;
   if (!match || typeof match === 'string') return;
 
-  const percentage = parseInt(match[1]!); // ✅ Now we're sure match[1] exists
+  const percentage = parseInt(match[1]!);
   await handleSell(ctx, percentage);
 });
 
@@ -243,7 +282,7 @@ async function handleBuy(ctx: any, amountSol: number) {
     await ctx.answerCallbackQuery();
     await ctx.reply("🔄 *Processing buy...*", { parse_mode: "Markdown" });
 
-    // BUY: SOL → Token
+    // BUY SOL → Token
     const swapTxn = await swap(
       "So11111111111111111111111111111111111111112", // Input: SOL
       tokenMint, // Output: Token
@@ -297,13 +336,13 @@ async function handleSell(ctx: any, percentage: number) {
     await ctx.answerCallbackQuery();
     await ctx.reply(`🔄 *Processing sell (${percentage}%)...*`, { parse_mode: "Markdown" });
 
-    // Calculate amount to sell
+
     const amountToSell = state.tokenAmount * (percentage / 100);
 
-    // Use token decimals instead of LAMPORTS_PER_SOL
+
     const amountInSmallestUnit = Math.floor(amountToSell * Math.pow(10, state.tokenDecimals));
 
-    // SELL: Token → SOL
+
     const swapTxn = await swap(
       state.tokenMint, // Input: Token
       "So11111111111111111111111111111111111111112", // Output: SOL
@@ -334,4 +373,123 @@ async function handleSell(ctx: any, percentage: number) {
   }
 }
 
+bot.callbackQuery("copyTrade", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!ctx.chatId) return;
+
+
+  userState[ctx.chatId.toString()] = { action: "copy" };
+
+  await ctx.reply("💡 *Please enter the Solana wallet address you want to copy:*", {
+    parse_mode: "Markdown"
+  });
+});
+
+
+
+bot.callbackQuery(/^copy_(.+)$/, async (ctx) => {
+  const match = ctx.match;
+  if (!match || typeof match === 'string') return;
+  
+  const percentage = parseInt(match[1]!);
+  await handleCopySetup(ctx, percentage);
+});
+
+bot.callbackQuery("stop_copy", async (ctx) => {
+  const chatId = ctx.chatId?.toString();
+  if (!chatId) return;
+
+  await ctx.answerCallbackQuery();
+
+  
+  const user = await prisma.user.findFirst({
+    where: { tgUserId: chatId }
+  });
+
+  if (user) {
+    await prisma.targetWallet.deleteMany({
+      where: { userId: user.id }
+    });
+    
+    await prisma.copySettings.delete({
+      where: { userId: user.id }
+    }).catch(() => {}); 
+  }
+
+  delete userState[chatId];
+
+  await ctx.reply("✅ *Copy trading stopped!*", { 
+    parse_mode: "Markdown",
+    reply_markup: inlineKeyboard 
+  });
+});
+
+async function handleCopySetup(ctx: any, percentage: number) {
+  try {
+    const chatId = ctx.chatId?.toString();
+    if (!chatId) return;
+
+    await ctx.answerCallbackQuery();
+
+    const state = userState[chatId];
+    if (!state?.targetWallet) {
+      return ctx.reply("⚠️ *No wallet selected.* Please start again.", { parse_mode: "Markdown" });
+    }
+
+    
+    const user = await prisma.user.findFirst({
+      where: { tgUserId: chatId }
+    });
+
+    if (!user) {
+      return ctx.reply("❌ *User not found.* Please use /start", { parse_mode: "Markdown" });
+    }
+
+    
+    const targetWallet = await prisma.targetWallet.create({
+      data: {
+        address: state.targetWallet,
+        userId: user.id,
+        isActive: true
+      }
+    });
+
+    
+    await prisma.copySettings.upsert({
+      where: { userId: user.id },
+      create: {
+        userId: user.id,
+        copyPercentage: percentage,
+        isActive: true
+      },
+      update: {
+        copyPercentage: percentage,
+        isActive: true
+      }
+    });
+
+    delete userState[chatId];
+
+    await ctx.reply(
+      `✅ *Copy Trading Activated!*\n\n` +
+      `📍 Target: \`${state.targetWallet}\`\n` +
+      `📊 Copy Percentage: ${percentage}%\n\n` +
+      `🤖 Bot will now monitor and copy trades automatically!`,
+      { 
+        parse_mode: "Markdown",
+        reply_markup: inlineKeyboard 
+      }
+    );
+
+    // TODO: Start monitoring this wallet (we'll do this next)
+    // monitorWallet(state.targetWallet, user.id, percentage);
+
+  } catch (error) {
+    console.error("Copy setup error:", error);
+    await ctx.reply("❌ *Error setting up copy trade.* Please try again.", { parse_mode: "Markdown" });
+    if (ctx.chatId) delete userState[ctx.chatId.toString()];
+  }
+}
+
 bot.start();
+

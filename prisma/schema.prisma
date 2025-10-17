@@ -19,29 +19,25 @@ model User {
   tgUserId   String
   privateKey String
   publicKey  String
+  targetWallets TargetWallet[]
+  copySettings  CopySettings?
 }
 
+model TargetWallet {
+  id        String   @id @default(uuid())
+  address   String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+model CopySettings {
+  id              String  @id @default(uuid())
+  userId          String  @unique
+  user            User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  copyPercentage  Float   @default(10)
+  maxTradeAmount  Float   @default(0.1) // Max 0.1 SOL per trade
+  isActive        Boolean @default(true)
+}
 
