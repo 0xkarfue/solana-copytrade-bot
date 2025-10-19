@@ -1,16 +1,18 @@
 import { Keypair, LAMPORTS_PER_SOL, Connection, VersionedTransaction } from "@solana/web3.js";
 import { Bot, InlineKeyboard } from "grammy";
-import { PrismaClient } from "./generated/prisma";
+// import { PrismaClient } from "./generated/prisma";
+import { startMonitoring, stopMonitoring, startAllMonitors } from "./services/monitor";
 import { getBalanceMessage } from "../getBalance";
+import { connection } from "../instance"
 import { swap } from "../swap";
 import { isValidToken } from "../utils/isValid";
 import { getUserTokens } from "../utils/getUserToken";
 import { isValidWallet } from "../utils/isValidWallet";
-
-const prisma = new PrismaClient();
+import { prisma } from "../instance";
+// const prisma = new PrismaClient();
 const token = process.env.TELEGRAM_BOT_TOKEN!;
 const bot = new Bot(token);
-const connection = new Connection(process.env.RPC_URL!);
+// const connection = new Connection(process.env.RPC_URL!);
 
 // hold state of user
 
@@ -153,15 +155,15 @@ bot.callbackQuery("sell", async (ctx) => {
 
 bot.on("message:text", async (ctx) => {
   const chatId = ctx.chatId.toString();
-  const inputText = ctx.message.text; 
+  const inputText = ctx.message.text;
 
   const state = userState[chatId];
 
   if (!state || !state.action) {
-    return; 
+    return;
   }
 
- 
+
   if (state.action === "copy") {
     const validation = await isValidWallet(inputText);
 
@@ -169,7 +171,7 @@ bot.on("message:text", async (ctx) => {
       return ctx.reply(`❌ *${validation.error}*`, { parse_mode: "Markdown" });
     }
 
-    
+
     if (!userState[chatId]) {
       userState[chatId] = {};
     }
@@ -184,27 +186,27 @@ bot.on("message:text", async (ctx) => {
     );
   }
 
-  
+
   const isValid = await isValidToken(inputText);
 
   if (!isValid) {
     return ctx.reply("⚠️ *Invalid Token Address!*", { parse_mode: "Markdown" });
   }
 
-  
+
   if (!userState[chatId]) {
     userState[chatId] = {};
   }
   userState[chatId].tokenMint = inputText;
 
   if (state.action === "buy") {
-    
+
     return ctx.reply("💰 *Enter the amount you want to trade:*", {
       parse_mode: "Markdown",
       reply_markup: buyOptions
     });
   } else if (state.action === "sell") {
-    
+
     const user = await prisma.user.findFirst({
       where: { tgUserId: chatId },
       select: { publicKey: true }
@@ -223,7 +225,6 @@ bot.on("message:text", async (ctx) => {
       return ctx.reply("❌ You don't hold this token in your wallet.");
     }
 
-    // Store amount and decimals
     if (!userState[chatId]) {
       userState[chatId] = {};
     }
@@ -390,7 +391,7 @@ bot.callbackQuery("copyTrade", async (ctx) => {
 bot.callbackQuery(/^copy_(.+)$/, async (ctx) => {
   const match = ctx.match;
   if (!match || typeof match === 'string') return;
-  
+
   const percentage = parseInt(match[1]!);
   await handleCopySetup(ctx, percentage);
 });
@@ -401,7 +402,7 @@ bot.callbackQuery("stop_copy", async (ctx) => {
 
   await ctx.answerCallbackQuery();
 
-  
+
   const user = await prisma.user.findFirst({
     where: { tgUserId: chatId }
   });
@@ -410,17 +411,17 @@ bot.callbackQuery("stop_copy", async (ctx) => {
     await prisma.targetWallet.deleteMany({
       where: { userId: user.id }
     });
-    
+
     await prisma.copySettings.delete({
       where: { userId: user.id }
-    }).catch(() => {}); 
+    }).catch(() => { });
   }
 
   delete userState[chatId];
 
-  await ctx.reply("✅ *Copy trading stopped!*", { 
+  await ctx.reply("✅ *Copy trading stopped!*", {
     parse_mode: "Markdown",
-    reply_markup: inlineKeyboard 
+    reply_markup: inlineKeyboard
   });
 });
 
@@ -436,7 +437,6 @@ async function handleCopySetup(ctx: any, percentage: number) {
       return ctx.reply("⚠️ *No wallet selected.* Please start again.", { parse_mode: "Markdown" });
     }
 
-    
     const user = await prisma.user.findFirst({
       where: { tgUserId: chatId }
     });
@@ -445,8 +445,8 @@ async function handleCopySetup(ctx: any, percentage: number) {
       return ctx.reply("❌ *User not found.* Please use /start", { parse_mode: "Markdown" });
     }
 
-    
-    const targetWallet = await prisma.targetWallet.create({
+
+    await prisma.targetWallet.create({
       data: {
         address: state.targetWallet,
         userId: user.id,
@@ -454,12 +454,12 @@ async function handleCopySetup(ctx: any, percentage: number) {
       }
     });
 
-    
     await prisma.copySettings.upsert({
       where: { userId: user.id },
       create: {
         userId: user.id,
         copyPercentage: percentage,
+        maxTradeAmount: 0.1, 
         isActive: true
       },
       update: {
@@ -470,19 +470,19 @@ async function handleCopySetup(ctx: any, percentage: number) {
 
     delete userState[chatId];
 
+    await startMonitoring(state.targetWallet, user.id, bot);
+
     await ctx.reply(
       `✅ *Copy Trading Activated!*\n\n` +
       `📍 Target: \`${state.targetWallet}\`\n` +
-      `📊 Copy Percentage: ${percentage}%\n\n` +
-      `🤖 Bot will now monitor and copy trades automatically!`,
+      `📊 Copy Percentage: ${percentage}%\n` +
+      `💰 Max Trade: 0.1 SOL\n\n` +
+      `🤖 Bot is now monitoring and will copy trades automatically!`,
       { 
         parse_mode: "Markdown",
         reply_markup: inlineKeyboard 
       }
     );
-
-    // TODO: Start monitoring this wallet (we'll do this next)
-    // monitorWallet(state.targetWallet, user.id, percentage);
 
   } catch (error) {
     console.error("Copy setup error:", error);
@@ -490,6 +490,47 @@ async function handleCopySetup(ctx: any, percentage: number) {
     if (ctx.chatId) delete userState[ctx.chatId.toString()];
   }
 }
+
+bot.callbackQuery("stop_copy", async (ctx) => {
+  const chatId = ctx.chatId?.toString();
+  if (!chatId) return;
+
+  await ctx.answerCallbackQuery();
+
+  const user = await prisma.user.findFirst({
+    where: { tgUserId: chatId },
+    include: { targetWallets: true }
+  });
+
+  if (user) {
+    for (const target of user.targetWallets) {
+      stopMonitoring(target.address);
+    }
+
+
+    await prisma.targetWallet.deleteMany({
+      where: { userId: user.id }
+    });
+    
+    await prisma.copySettings.delete({
+      where: { userId: user.id }
+    }).catch(() => {});
+  }
+
+  delete userState[chatId];
+
+  await ctx.reply("✅ *Copy trading stopped!*", { 
+    parse_mode: "Markdown",
+    reply_markup: inlineKeyboard 
+  });
+});
+
+startAllMonitors(bot).then(() => {
+  console.log("🤖 Bot is ready and monitoring active copy trades!");
+});
+
+bot.start();
+
 
 bot.start();
 

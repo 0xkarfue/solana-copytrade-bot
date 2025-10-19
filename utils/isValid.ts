@@ -1,6 +1,6 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 
-const connection = new Connection(process.env.RPC_URL!);
+import { connection } from "../instance"
 
 export async function isValidToken(mintAddress: string) {
     try {
